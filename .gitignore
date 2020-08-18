@@ -1,0 +1,6 @@
+*.csv
+keys.py
+*.txt
+.venv
+*.ods
+__pycache__
