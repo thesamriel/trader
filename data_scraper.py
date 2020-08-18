@@ -169,19 +169,24 @@ class DataScraper(finnhub.Client):
             data = candle_prep(data)
             data.to_csv("hist_data/{}_Daily.csv".format(symbol))
 
-    def get_yesterday_minutes(self, watchlist):
+    def get_intraday_minutes(self, watchlist, day=None, flag='today'):
         no_data = []
         watch_dict = {}
         prev_closes = {}
-        print("Fetching yesterdays intraday data...")
+
+        print("Fetching intraday data...")
+        day = day if day else datetime.today()
+        if flag == 'yesterday':
+            delta = 3 if day.weekday() == 0 else 1
+            day = day - timedelta(delta)
+        time_start = time_to_unix(day.replace(hour=15,minute=30, second=0))
+        time_end = time_to_unix(day.replace(hour=22,minute=0, second=30))
         for symbol in watchlist:
             while True:
                 try:
-                    data = self.stock_candles(symbol, 1, 
-                        time_to_unix(datetime.today().replace(hour=15,minute=30, second=0)-timedelta(1)), 
-                        time_to_unix(datetime.today().replace(hour=22,minute=0, second=30)-timedelta(1)))
+                    data = self.stock_candles(symbol, 1, time_start, time_end)
                     break
-                except finnhub.exceptions.FinnhubAPIException:
+                except finnhub.exceptions.FinnhubAPIException or urllib3.exceptions.ReadTimeoutError:
                     time.sleep(10)
 
             if data['s'] == 'no_data':
@@ -191,9 +196,10 @@ class DataScraper(finnhub.Client):
             data = self.minutes_prep(data)
             watch_dict[symbol] = data
             prev_closes[symbol] = data['Price'].iloc[-1]
-            data.to_csv("minute_data/{}_Daily.csv".format(symbol))
+            data.to_csv("minute_data/{}_Intraday_{}.csv".format(symbol, day.date().isoformat()))
 
-        print("no intraday data found for these symbols: \n", no_data)   
+        if len(no_data) > 0:
+            print("no intraday data found for these symbols: \n", no_data)   
         return watch_dict, no_data, prev_closes
 
 
@@ -223,7 +229,7 @@ if __name__ == "__main__":
     # send_slack_dm(slackClient, "helo helo my friendos, look at those gainers: \n https://finance.yahoo.com/gainers")
 
     finnclient = DataScraper()
-    print(finnclient.candles_as_pd("NRZ", 'D', time_to_unix(datetime(2020, 7,30,5,0,0)), time_to_unix(datetime(2020, 8,5,22,0,0))))
+    finnclient.updateTrading212Dailies()
     # print(finnclient.quote('AAPL'))
     # apple_minutes = finnclient.candles_as_pd("AAPL", 1, time_to_unix(datetime(2020, 7,31,5,0,0)), time_to_unix(datetime(2020, 8,1,12,0,0)))
     # print(apple_minutes)

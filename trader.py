@@ -8,6 +8,7 @@ from broker import Broker, Commission
 import threading
 from pathlib import Path
 import numpy as np
+from keys import SCREENER_URL
 
 class Trader():
     def __init__(self, update_dailies=False, ignore_market=False, wait_open=True, max_minutes=None):
@@ -36,14 +37,11 @@ class Trader():
     def add_strategy(self, strategy):
         self.strategies.append(strategy)
 
-    def update_global_watchlist(self):
+    def update_global_watchlist(self, day=None, sim=False):
         full_watchlist = []
         for strategy in self.strategies:
-                full_watchlist += strategy.update_watchlist()
+                full_watchlist += strategy.update_watchlist(screener_url=SCREENER_URL, day=day, sim=sim)
                 self.global_watchlist = set(full_watchlist)
-        print(self.global_watchlist)
-        if len(self.global_watchlist) > 50:
-            raise ValueError("Too many symbols on the watchlist for the free Finnhub API Plan")
     
     def update_global_watchlist_from_data(self, del_symbols):
         for strategy in self.strategies:
@@ -52,6 +50,7 @@ class Trader():
                     strategy.watchlist.remove(symbol)
         for symbol in del_symbols:
             self.global_watchlist.remove(symbol)
+        print("Final watchlist: \n", self.global_watchlist)
 
     def get_quotes(self):
         self.global_quotes = {}
@@ -152,15 +151,42 @@ class SimTrader(Trader):
     def __init__(self, sim_date, **kwargs):
         super(SimTrader, self).__init__(**kwargs)
         self.day = sim_date
+        self.watchdata_today = {}
     
+    def get_minutes(self, step):
+        open_time = self.day.replace(hour=13, minute=30,second=0)
+        get_minute = (open_time + timedelta(minutes=step))
 
-    def test(self):
-        path = Path('./hist_data/ACTG_Daily.csv')
-        data = pd.read_csv(str(path), index_col="Time", parse_dates=True)
-        print(np.where(data.index.date == self.day))
-        index = np.where(data.index.date == self.day)[0][0]
-        print(index)
-        print(data.Close.iloc[index])
+        for symbol in self.global_watchlist:
+            if get_minute in self.watchdata_today[symbol].index.to_pydatetime():
+                self.global_watchdata[symbol] = self.watchdata_today[symbol].loc[get_minute, :]
+            else:
+                self.global_watchdata[symbol] = pd.Series(name=get_minute, dtype='float64')
+
+    def end(self):
+        for strategy in self.strategies:
+            strategy.end(self.day)   
+
+    def run(self):
+        if self.day.weekday() > 4:
+            print("Requested day was weekend!")
+            return
+        self.update_global_watchlist(day=self.day, sim=True)
+        self.global_watchdata, no_data_symbols, self.global_prev_close = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day, flag='yesterday')
+        self.update_global_watchlist_from_data(no_data_symbols)
+        self.data_scraper.watchlist = self.global_watchlist
+        self.send_yesterday_minutes(prev_closes=True)
+
+        self.watchdata_today, _, __ = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day)
+
+        for i in range(400):
+            self.get_minutes(step=i)
+            self.send_minutes()
+
+            self.calculations()
+
+        self.end()
+        self.data_scraper.ws.close()
 
 
 
@@ -174,10 +200,10 @@ strats.append(MACDStrategy(broker=broker1, portfolio=Portfolio(), name="macd-26-
 # strats.append(MomentumStrategy(broker=broker2, portfolio=Portfolio(), name="mom"))
 
 
-# trader = Trader(update_dailies=True, ignore_market=False, wait_open=True, max_minutes=None)
-trader = SimTrader(sim_date=date(2020,8, 8))
+# trader = Trader(update_dailies=False, ignore_market=True, wait_open=False, max_minutes=1)
+trader = SimTrader(sim_date=datetime(2020,8, 6))
 
 for strat in strats:
     trader.add_strategy(strat)
 
-trader.test()
+trader.run()

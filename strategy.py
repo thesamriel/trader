@@ -4,6 +4,9 @@ import numpy as np
 from portfolio import Portfolio, Order, OrderStatus
 from broker import Broker, Commission
 from datetime import date, datetime, time
+import bs4
+import requests
+from bs4 import BeautifulSoup
 
 
 class BaseStrategy():
@@ -37,26 +40,51 @@ class BaseStrategy():
         if prev_c:
             self.prev_close[symbol] = prev_c
 
-    def update_watchlist(self, day=None):
-        """ (Not Changable on free API plan) Set the watchlist for the day """
-        volumes = []
-
-
+    def update_watchlist(self, screener_url, day=None, sim=False):
+        """ Set the watchlist for the day from a yahoo screener"""
+        page = 0
+        stock_count = 1
         if len(self.watchlist) < 1:
+            # Decide watchlist from yesterdays data
             paths = Path('./hist_data').glob('**/*.csv')
             for path in paths:
                 data = pd.read_csv(str(path), index_col="Time", parse_dates=True)
-                date_index = np.where(data.index.date == day)[0][0] if day else -1
-                if (data['Close'].iloc[date_index] > 2.0 and data['Close'].iloc[date_index] < 20.0 
-                        and data['Volume'].iloc[date_index] > 1500000 and data['Volume'].iloc[date_index-1] > 1500000 and data['Volume'].iloc[date_index-2] > 1500000
+                if sim:
+                    try:
+                        date_index = np.where(data.index.date == day.date())[0][0]
+                    except IndexError:
+                        continue
+                else:
+                    date_index = -1
+
+                if (data['Close'].iloc[date_index] > 1.5 and data['Close'].iloc[date_index] < 25.0 
+                        and data['Volume'].iloc[date_index] > 1000000 and data['Volume'].iloc[date_index-1] > 1000000 and data['Volume'].iloc[date_index-2] > 1000000
                         and data['Volume'].iloc[date_index] > data['Volume'].iloc[date_index-1]):
                     symbol = path.name.split('_')[0]
                     self.watchlist.append(symbol)
-                    volumes.append(data['Volume'].iloc[date_index])
             print(len(self.watchlist), " possible stocks")
-            vols = np.array(volumes)
-            vols = vols.argsort()[-50:]
-            self.watchlist = list(np.array(self.watchlist)[vols])
+
+            # Check which symbols are also in selected yahoo screener
+            if not sim:
+                yahoo_symbols = []
+                while stock_count > 0:
+                    # URL for stock screener: US, price [1,30], volume > 1,000,000
+                    url = screener_url + "?count=100&offset=" + str(page*100)
+                    r = requests.get(url)
+                    soup = bs4.BeautifulSoup(r.text, "lxml")
+                    table = soup.select('tr[class*=simpTblRow]')
+                    stock_count = len(table)
+                    for row in table:
+                        row_soup = bs4.BeautifulSoup(str(row), "lxml")
+                        symbol = row_soup.find('a', {'class':'Fw(600) C($linkColor)'}).text
+                        yahoo_symbols.append(symbol)
+                    page += 1
+
+                # combine watchlists      
+                yahoo_symbols = set(yahoo_symbols)
+                watchlist = yahoo_symbols.intersection(self.watchlist)
+                print(len(self.watchlist), " stocks being watched.")
+
         return self.watchlist
 
     def set_portfolio(self, portfolio):
@@ -174,13 +202,13 @@ class BaseStrategy():
         """ (Changable) Determine and return the amount of shares to be bought in one order """
         return self.default_size
 
-    def end(self):
+    def end(self, day=None):
         """ Execute at the end of the day or end of trading time """
-        pd.DataFrame(self.portfolio.history).to_csv("{}_{}.csv".format(date.today().isoformat(), self.name))
+        day = day.date() if day else date.today()
+        pd.DataFrame(self.portfolio.history).to_csv("portfolio_{}_{}.csv".format(day.isoformat(), self.name))
         print("Final cash in portfolio: ", self.portfolio.cash, " €")
-        for i in range(3):
-            symbol = list(self.watchdata.keys())[i]
-            self.watchdata[symbol].to_csv("zzzzztest{}_{}.csv".format(self.name, symbol))
+        for symbol in set(pd.DataFrame(self.portfolio.history)['Symbol']):
+            self.watchdata[symbol].to_csv("traded_symbols/{}_{}.csv".format(day, symbol))
         
         
     def append_quote(self, symbol, quote):
