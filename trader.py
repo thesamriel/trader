@@ -9,13 +9,14 @@ import threading
 from pathlib import Path
 import numpy as np
 from keys import SCREENER_URL
+from utils import progressBar
 
 class Trader():
-    def __init__(self, update_dailies=False, ignore_market=False, wait_open=True, max_minutes=None):
+    def __init__(self, strategy, update_dailies=False, ignore_market=False, wait_open=True, max_minutes=None, day=None):
         self.trading_hours = [time(15,30,0), time(22,0,0)]
         self.uptime = timedelta()
-        self.strategies = []
-        self.global_watchlist = ()
+        self.strategy = strategy
+        self.global_watchlist = []
         self.data_scraper = data_scraper.DataScraper()
         self.temp_global_watchdata = {}
         self.global_prev_close = {}
@@ -23,6 +24,7 @@ class Trader():
         self.ignore_market = ignore_market
         self.wait_open = wait_open
         self.max_minutes = max_minutes
+        self.day = day or datetime.today() 
         return
 
 
@@ -34,20 +36,14 @@ class Trader():
     def in_trading_hours(self):
         return datetime.now().time() >= self.trading_hours[0] and datetime.now().time() <= self.trading_hours[1]
 
-    def add_strategy(self, strategy):
-        self.strategies.append(strategy)
-
-    def update_global_watchlist(self, day=None, sim=False):
-        full_watchlist = []
-        for strategy in self.strategies:
-                full_watchlist += strategy.update_watchlist(screener_url=SCREENER_URL, day=day, sim=sim)
-                self.global_watchlist = set(full_watchlist)
+    def set_global_watchlist(self, sim=False):
+        full_watchlist = self.strategy.set_watchlist(screener_url=SCREENER_URL, sim=sim)
+        self.global_watchlist = full_watchlist
     
     def update_global_watchlist_from_data(self, del_symbols):
-        for strategy in self.strategies:
-            for symbol in del_symbols:
-                if symbol in strategy.watchlist:
-                    strategy.watchlist.remove(symbol)
+        for symbol in del_symbols:
+            if symbol in self.strategy.watchlist:
+                self.strategy.watchlist.remove(symbol)
         for symbol in del_symbols:
             self.global_watchlist.remove(symbol)
         print("Final watchlist: \n", self.global_watchlist)
@@ -61,42 +57,30 @@ class Trader():
 
     def send_quotes(self):
         for symbol, quote in self.global_quotes.items():
-            for strategy in self.strategies:
-                if symbol in strategy.watchlist:
-                    strategy.append_quote(symbol, quote)
+            if symbol in self.strategy.watchlist:
+                self.strategy.append_quote(symbol, quote)
                 
     def get_minutes(self):
-        minute_data = self.data_scraper.get_today_minutes()
-        now = datetime.now()
-        get_minute = (now - timedelta(hours=2, minutes=1, seconds=now.second, microseconds=now.microsecond))
-        for symbol in self.global_watchlist:
-            if minute_data[symbol].size > 0 and get_minute in minute_data[symbol].index.to_pydatetime():
-                self.global_watchdata[symbol] = minute_data[symbol].loc[get_minute, :]
-            else:
-                self.global_watchdata[symbol] = pd.Series(name=get_minute, dtype='float64')
+        self.global_watchdata = self.data_scraper.get_today_minutes()
 
     def send_minutes(self):
         for symbol, data in self.global_watchdata.items():
-            for strategy in self.strategies:
-                if symbol in strategy.watchlist:
-                    strategy.append_minute(symbol, data)
+            if symbol in self.strategy.watchlist:
+                self.strategy.append_minute(symbol, data)
 
     def send_yesterday_minutes(self, prev_closes=False):
         for symbol, data in self.global_watchdata.items():
-            for strategy in self.strategies:
-                if symbol in strategy.watchlist:
-                    if prev_closes:
-                        strategy.append_yesterday_minutes(symbol, data, prev_c=self.global_prev_close[symbol])
-                    else:
-                        strategy.append_yesterday_minutes(symbol, data)
+            if symbol in self.strategy.watchlist:
+                if prev_closes:
+                    self.strategy.append_yesterday_minutes(symbol, data, prev_c=self.global_prev_close[symbol])
+                else:
+                    self.strategy.append_yesterday_minutes(symbol, data)
 
     def calculations(self):
-        for strategy in self.strategies:
-            strategy.step()
+        self.strategy.step()
 
     def end(self):
-        for strategy in self.strategies:
-            strategy.end()
+        self.strategy.end()
 
 
     def run(self):
@@ -105,8 +89,8 @@ class Trader():
         if self.update_dailies:
             self.data_scraper.updateTrading212Dailies()
 
-        self.update_global_watchlist()
-        self.global_watchdata, no_data_symbols, self.global_prev_close = self.data_scraper.get_yesterday_minutes(self.global_watchlist)
+        self.set_global_watchlist()
+        self.global_watchdata, no_data_symbols, self.global_prev_close = self.data_scraper.get_intraday_minutes(self.global_watchlist, flag='yesterday')
         self.update_global_watchlist_from_data(no_data_symbols)
         self.data_scraper.watchlist = self.global_watchlist
         self.send_yesterday_minutes(prev_closes=True)
@@ -115,21 +99,11 @@ class Trader():
             while not self.in_trading_hours():
                 tm.sleep(10)
 
-        self.data_scraper.start_ws_thread()
-
-        conn_timeout = 20
-        while not self.data_scraper.ws.sock.connected and conn_timeout:
-            print("Connecting Websocket ...")
-            tm.sleep(1)
-            conn_timeout -= 1
-
-        if not self.data_scraper.ws.sock.connected:
-            print("Connection to Finnhub Socket failed!!!")
-
         self.starttime = datetime.now()
+        step = 0
         while (self.in_trading_hours() or self.ignore_market):
             tm.sleep((65.0 - (datetime.now().second+1)) % 60) # poll data 5 secs after full minute
-            print("tick, thread: ", threading.current_thread().ident)
+            print("tick ", step)
             self.get_minutes()
             self.send_minutes()
 
@@ -138,21 +112,29 @@ class Trader():
             self.uptime =(datetime.now() - self.starttime)
             if self.max_minutes and (self.uptime > timedelta(minutes=self.max_minutes)):
                 break
-            # self.data_scraper.start_ws_thread()
-            print("Threads in main: ", threading.active_count())
-            self.data_scraper.keep_websocket_running()
             tm.sleep(1)
+            step += 1
 
         self.end()
-        self.data_scraper.ws.close()
 
 
 class SimTrader(Trader):
-    def __init__(self, sim_date, **kwargs):
+    def __init__(self, market_days=1, **kwargs):
         super(SimTrader, self).__init__(**kwargs)
-        self.day = sim_date
         self.watchdata_today = {}
-    
+        self.sim_dates = self.list_market_days(self.day, market_days)
+
+    def list_market_days(self, last_day, market_days):
+        cur_date = last_day
+        dates = []
+        for i in range(market_days):
+            while cur_date.weekday() > 4:
+                cur_date = cur_date - timedelta(1)
+            dates.append(cur_date)
+            cur_date = cur_date - timedelta(1)
+        dates.reverse()
+        return dates
+
     def get_minutes(self, step):
         open_time = self.day.replace(hour=13, minute=30,second=0)
         get_minute = (open_time + timedelta(minutes=step))
@@ -163,31 +145,42 @@ class SimTrader(Trader):
             else:
                 self.global_watchdata[symbol] = pd.Series(name=get_minute, dtype='float64')
 
-    def end(self):
-        for strategy in self.strategies:
-            strategy.end(self.day)   
+    def early_stop(self):
+        positioned = self.strategy.in_position()
+        return not positioned
 
     def run(self):
+
         if self.day.weekday() > 4:
             print("Requested day was weekend!")
             return
-        self.update_global_watchlist(day=self.day, sim=True)
-        self.global_watchdata, no_data_symbols, self.global_prev_close = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day, flag='yesterday')
-        self.update_global_watchlist_from_data(no_data_symbols)
-        self.data_scraper.watchlist = self.global_watchlist
-        self.send_yesterday_minutes(prev_closes=True)
 
-        self.watchdata_today, _, __ = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day)
+        if self.update_dailies:
+            self.data_scraper.updateTrading212Dailies()
 
-        for i in range(400):
-            self.get_minutes(step=i)
-            self.send_minutes()
+        for date in self.sim_dates:
+            self.day = date
+            self.strategy.initialize(self.day)
 
-            self.calculations()
+            self.set_global_watchlist(sim=True)
+            self.global_watchdata, no_data_symbols, self.global_prev_close = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day, flag='yesterday')
+            self.update_global_watchlist_from_data(no_data_symbols)
+            self.data_scraper.watchlist = self.global_watchlist
+            self.send_yesterday_minutes(prev_closes=True)
 
-        self.end()
-        self.data_scraper.ws.close()
+            self.watchdata_today, no_data_symbols, __ = self.data_scraper.get_intraday_minutes(self.global_watchlist, self.day)
+            self.update_global_watchlist_from_data(no_data_symbols)
 
+            for i in range(400):
+                self.get_minutes(step=i)
+                self.send_minutes()
+
+                self.calculations()
+
+                if self.early_stop():
+                    break
+
+            self.end()
 
 
 
@@ -195,15 +188,11 @@ commission_tr = Commission(fixed=1.17)
 broker1 = Broker(commission=commission_tr, send_note=False)
 broker2 = Broker(commission=commission_tr)
 
-strats = []
-strats.append(MACDStrategy(broker=broker1, portfolio=Portfolio(), name="macd-26-12-9"))
-# strats.append(MomentumStrategy(broker=broker2, portfolio=Portfolio(), name="mom"))
+strat1 = MACDStrategy(broker=broker1, portfolio=Portfolio(), sma=50, name="macd-rsi-smatest")
+# strat2 = (MomentumStrategy(broker=broker2, portfolio=Portfolio(), name="mom"))
 
 
-# trader = Trader(update_dailies=False, ignore_market=True, wait_open=False, max_minutes=1)
-trader = SimTrader(sim_date=datetime(2020,8, 6))
-
-for strat in strats:
-    trader.add_strategy(strat)
+# trader = Trader(update_dailies=False, ignore_market=True, wait_open=False, max_minutes=0)
+trader = SimTrader(strategy=strat1, update_dailies=False, market_days=2, day=datetime(2020,8, 18))
 
 trader.run()

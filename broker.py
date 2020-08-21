@@ -1,23 +1,12 @@
 # from portfolio import Portfolio
 from portfolio import OrderStatus
 from slack import WebClient
-from slack.errors import SlackApiError
 from keys import SLACK_TOKEN
+from utils import send_slack_dm
 
-def send_slack_dm(client, msg):
-    try:
-        client.chat_postMessage(
-            channel='U0179PW8C4X',              # my User-ID
-            text=msg)
-    except SlackApiError as e:
-        # You will get a SlackApiError if "ok" is False
-        assert e.response["ok"] is False
-        assert e.response["error"]  # str like 'invalid_auth', 'channel_not_found'
-        print(f"Got an error: {e.response['error']}")
-    except:
-        return
 
 class Broker():
+    """ Broker object. Executes orders. Contains portfolio information """
     def __init__(self, commission=None, portfolio=None, send_note=False):
         self.commission = commission
         self.portfolio = portfolio
@@ -63,6 +52,7 @@ class Broker():
 
 
 class Commission():
+    """ Commission object """
     def __init__(self, fixed=0.0, percentage=0.0, fixed_per_share=0.0):
         self.fixed = fixed
         self.percentage = percentage

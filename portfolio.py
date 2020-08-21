@@ -5,11 +5,14 @@ import pandas as pd
 class Portfolio():
 
     def __init__(self, start_cash=1000, broker=None):
+        self.init_cash = start_cash
         self.value = start_cash
         self.cash = start_cash
-        self.broker = broker
         self.history = []
     
+    def reset(self):
+        self.cash = self.init_cash
+        self.history = []
 
     def setcash(self, value):
         self.cash = value

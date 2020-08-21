@@ -23,6 +23,18 @@ class BaseStrategy():
         self.open_sells = []
         self.default_stop = default_stop
         self.name = name
+        self.proj_folder = Path(self.name)
+        self.proj_folder.mkdir(parents=True, exist_ok=True)    
+        self.day = datetime.today()
+
+    def initialize(self, day):
+        self.watchlist = []
+        self.watchdata = {}
+        self.prev_close = {}
+        self.positions = {}
+        self.step_count = 0
+        self.portfolio.reset()
+        self.day = day or datetime.today()
 
     def append_minute(self, symbol, data):
         """ Append the Price data gathered for the last full minute """
@@ -40,50 +52,50 @@ class BaseStrategy():
         if prev_c:
             self.prev_close[symbol] = prev_c
 
-    def update_watchlist(self, screener_url, day=None, sim=False):
+    def set_watchlist(self, screener_url, sim=False):
         """ Set the watchlist for the day from a yahoo screener"""
         page = 0
         stock_count = 1
-        if len(self.watchlist) < 1:
-            # Decide watchlist from yesterdays data
-            paths = Path('./hist_data').glob('**/*.csv')
-            for path in paths:
-                data = pd.read_csv(str(path), index_col="Time", parse_dates=True)
-                if sim:
-                    try:
-                        date_index = np.where(data.index.date == day.date())[0][0]
-                    except IndexError:
-                        continue
-                else:
-                    date_index = -1
 
-                if (data['Close'].iloc[date_index] > 1.5 and data['Close'].iloc[date_index] < 25.0 
-                        and data['Volume'].iloc[date_index] > 1000000 and data['Volume'].iloc[date_index-1] > 1000000 and data['Volume'].iloc[date_index-2] > 1000000
-                        and data['Volume'].iloc[date_index] > data['Volume'].iloc[date_index-1]):
-                    symbol = path.name.split('_')[0]
-                    self.watchlist.append(symbol)
-            print(len(self.watchlist), " possible stocks")
+        # Decide watchlist from yesterdays data
+        paths = Path('./hist_data').glob('**/*.csv')
+        for path in paths:
+            data = pd.read_csv(str(path), index_col="Time", parse_dates=True)
+            if sim:
+                try:
+                    date_index = np.where(data.index.date == self.day.date())[0][0]
+                except IndexError:
+                    continue
+            else:
+                date_index = len(data) - 1
 
-            # Check which symbols are also in selected yahoo screener
-            if not sim:
-                yahoo_symbols = []
-                while stock_count > 0:
-                    # URL for stock screener: US, price [1,30], volume > 1,000,000
-                    url = screener_url + "?count=100&offset=" + str(page*100)
-                    r = requests.get(url)
-                    soup = bs4.BeautifulSoup(r.text, "lxml")
-                    table = soup.select('tr[class*=simpTblRow]')
-                    stock_count = len(table)
-                    for row in table:
-                        row_soup = bs4.BeautifulSoup(str(row), "lxml")
-                        symbol = row_soup.find('a', {'class':'Fw(600) C($linkColor)'}).text
-                        yahoo_symbols.append(symbol)
-                    page += 1
+            if (2.0 < data['Close'].iloc[date_index] < 25.0 
+                    and (data['Volume'].iloc[date_index - 3 : date_index + 1] > 1000000).all()
+                    and data['Volume'].iloc[date_index] > data['Volume'].iloc[date_index-1]):
+                symbol = path.name.split('_')[0]
+                self.watchlist.append(symbol)
+        print(len(self.watchlist), " possible stocks")
 
-                # combine watchlists      
-                yahoo_symbols = set(yahoo_symbols)
-                watchlist = yahoo_symbols.intersection(self.watchlist)
-                print(len(self.watchlist), " stocks being watched.")
+        # Check which symbols are also in selected yahoo screener
+        if not sim:
+            yahoo_symbols = []
+            while stock_count > 0:
+                # URL for stock screener: US, price [1,30], volume > 1,000,000
+                url = screener_url + "?count=100&offset=" + str(page*100)
+                r = requests.get(url)
+                soup = bs4.BeautifulSoup(r.text, "lxml")
+                table = soup.select('tr[class*=simpTblRow]')
+                stock_count = len(table)
+                for row in table:
+                    row_soup = bs4.BeautifulSoup(str(row), "lxml")
+                    symbol = row_soup.find('a', {'class':'Fw(600) C($linkColor)'}).text
+                    yahoo_symbols.append(symbol)
+                page += 1
+
+            # combine watchlists      
+            yahoo_symbols = set(yahoo_symbols)
+            self.watchlist = yahoo_symbols.intersection(self.watchlist)
+            print(len(self.watchlist), " stocks are also on yahoo screener.")
 
         return self.watchlist
 
@@ -168,6 +180,11 @@ class BaseStrategy():
         self.open_buys = [order for order in self.open_buys if order.status.value < 3]
         self.end_step()
 
+    def in_position(self):
+        """ (Changable) Check if all positions are exited, so early stopping is possible """
+        if self.step_count > 120 and len(self.positions) == 0:
+            return False
+        return True
 
     def begin_step(self):
         """ (Changable) Additional Things to do at the beginning of a step """
@@ -202,13 +219,16 @@ class BaseStrategy():
         """ (Changable) Determine and return the amount of shares to be bought in one order """
         return self.default_size
 
-    def end(self, day=None):
+    def end(self):
         """ Execute at the end of the day or end of trading time """
-        day = day.date() if day else date.today()
-        pd.DataFrame(self.portfolio.history).to_csv("portfolio_{}_{}.csv".format(day.isoformat(), self.name))
-        print("Final cash in portfolio: ", self.portfolio.cash, " €")
-        for symbol in set(pd.DataFrame(self.portfolio.history)['Symbol']):
-            self.watchdata[symbol].to_csv("traded_symbols/{}_{}.csv".format(day, symbol))
+        print("Final cash in portfolio of ", self.name, ": ", self.portfolio.cash, " €")       
+        if len(self.portfolio.history) > 0:
+            save_path = self.proj_folder.joinpath(self.day.date().isoformat())
+            save_path.mkdir(parents=True, exist_ok=True)    
+            pd.DataFrame(self.portfolio.history).to_csv(save_path / "00Portfolio.csv")
+
+            for symbol in set(pd.DataFrame(self.portfolio.history)['Symbol']):
+                self.watchdata[symbol].to_csv(save_path / "{}_Indicators.csv".format(symbol))
         
         
     def append_quote(self, symbol, quote):
@@ -221,11 +241,13 @@ class BaseStrategy():
 
 
 class MACDStrategy(BaseStrategy):
-    def __init__(self, spans=(26, 12, 9), risk=0.01, **kwargs):
+    def __init__(self, spans=(26, 12, 9), sma=50, risk=0.01, **kwargs):
         super(MACDStrategy, self).__init__(**kwargs)
         self.risk = risk
         self.spans = spans
-
+        self.sma = sma
+        self.highs15 = {}
+        self.rsi80 = {}
 
     def calculate_indicators(self, symbol):
         """ (Changable) Add technical indicator columns needed for the strategy """
@@ -233,12 +255,23 @@ class MACDStrategy(BaseStrategy):
         ema_short = self.watchdata[symbol].Price.ewm(span=self.spans[1], adjust=False).mean()
         macd = ema_short - ema_long
         signal = macd.ewm(span=self.spans[2], adjust=False).mean()
-        sma50 = self.watchdata[symbol].Price.rolling(50).mean()
+        sma50 = self.watchdata[symbol].Price.rolling(self.sma).mean()
+        delta = self.watchdata[symbol].Price.diff()[1:]
+        up, down = delta.copy(), delta.copy()
+        up[up<0] = 0
+        down[down>0] = 0
+        roll_up1 = up.ewm(span=14).mean()
+        roll_down1 = down.abs().ewm(span=14).mean()
+        RS1 = roll_up1 / roll_down1
+        RSI1 = 100.0 - (100.0 / (1.0 + RS1))
+        sma100 = self.watchdata[symbol].Price.rolling(100).mean()
 
         self.watchdata[symbol]['MACD'] = macd
         self.watchdata[symbol]['Signal'] = signal
         self.watchdata[symbol]['MACD-Dif'] = macd - signal
         self.watchdata[symbol]['SMA50'] = sma50
+        self.watchdata[symbol]['RSI'] = RSI1
+        self.watchdata[symbol]['SMA100'] = sma100
 
     def calculate_max_loss(self, symbol, cur_price):
         """ (Changable) Determine the minimum price to sell the stock """
@@ -252,20 +285,36 @@ class MACDStrategy(BaseStrategy):
     def buy_condition(self, symbol):
         """ (Changable) Determine when to buy stock """
         if self.step_count > 15 and self.step_count < 80 and symbol not in self.positions:
-            if self.watchdata[symbol]['SMA50'].iloc[-1] > self.watchdata[symbol]['SMA50'].iloc[-2]:
-                if self.watchdata[symbol]['MACD-Dif'].iloc[-1] > 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] < 0:
-                    return True
+            if self.watchdata[symbol]['Price'].iloc[-1] > self.highs15[symbol]:
+                if (np.all(np.diff(self.watchdata[symbol]['SMA50'].iloc[-4:].to_numpy()) >= 0)
+                    and np.all(np.diff(self.watchdata[symbol]['SMA100'].iloc[-2:].to_numpy()) >= 0)):
+                    if (self.watchdata[symbol]['MACD-Dif'].iloc[-1] > 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] < 0
+                        and self.watchdata[symbol]['MACD'].iloc[-1] > 0.005):
+                        # if np.all(np.diff(self.watchdata[symbol]['MACD-Dif'].iloc[-2:].to_numpy()) >= 0):
+                        if self.watchdata[symbol]['RSI'].iloc[-1] < 70:
+                            return True
         return False
 
     def sell_condition(self, symbol):
         """ (Changable) Determine when to sell stock """
         cur_price = self.watchdata[symbol]['Price'].iloc[-1]
         if symbol in self.positions:
-            if (self.positions[symbol]['target'] <= cur_price or 
-                self.positions[symbol]['stop_loss'] >= cur_price or
-                self.watchdata[symbol]['SMA50'].iloc[-1] < self.watchdata[symbol]['SMA50'].iloc[-2] or
-                (self.watchdata[symbol]['MACD-Dif'].iloc[-1] < 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] > 0)):
-                return True
+            if ((self.watchdata[symbol].index.tolist()[-1] - self.positions[symbol]['buy_time']).seconds / 60 > 3):
+                if (self.positions[symbol]['target'] <= cur_price):
+                    print("target reached")
+                    return True
+                if self.positions[symbol]['stop_loss'] >= cur_price:
+                    print("stop loss reached")
+                    return True
+                if self.watchdata[symbol]['SMA50'].iloc[-1] < self.watchdata[symbol]['SMA50'].iloc[-2] < self.watchdata[symbol]['SMA50'].iloc[-3] :
+                    print("SMA going down")
+                    return True
+                # if (self.watchdata[symbol]['MACD-Dif'].iloc[-1] < 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] > 0):
+                #     print("MACD Crossover")
+                #     return True
+                if self.watchdata[symbol]['RSI'].iloc[-1] > 80:
+                    print("RSI over 80")
+                    return True
 
         return False
 
@@ -279,6 +328,9 @@ class MACDStrategy(BaseStrategy):
         return self.default_size
 
     def end_step(self):
+        if self.step_count <= 15:
+            for symbol in self.watchlist:
+                self.highs15[symbol] = max(self.highs15.get(symbol, 0), self.watchdata[symbol]['Price'].iloc[-1])
         if self.steps_until_close in [150, 149, 148]:
             for symbol in self.positions:
                 self.positions[symbol]['target'] = self.positions[symbol]['buy_price'] * 1.01
@@ -287,7 +339,12 @@ class MACDStrategy(BaseStrategy):
                 self.positions[symbol]['target'] = self.positions[symbol]['buy_price']
         if self.steps_until_close in [5, 4, 3]:
             for symbol in self.positions:
-                self.positions[symbol]['target'] = self.positions[symbol]['stop_loss']           
+                self.positions[symbol]['target'] = self.positions[symbol]['stop_loss']
+
+    def end(self):
+        super().end()
+        self.highs15 = {}
+        self.rsi80 = {}       
 
 
 

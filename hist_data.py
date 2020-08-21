@@ -92,7 +92,7 @@ class AVClient(object):
 
 if __name__ == '__main__':
 
-    avclient = AVClient(api_key=AV_API_KEY)
-
-    intraday = avclient.quote("AAPL", csv=True)
-    print(intraday)
+    df = pd.DataFrame({'nums': [1,2,3,4,5,6]})
+    print(df, '\n')
+    print(len(df['nums']))
+    print(df['nums'].iloc[1:len(df['nums'])])
