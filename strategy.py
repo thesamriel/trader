@@ -19,8 +19,7 @@ class BaseStrategy():
         self.step_count = 0
         self.portfolio = portfolio
         self.broker = broker
-        self.open_buys = []
-        self.open_sells = []
+        self.open_orders = {}
         self.default_stop = default_stop
         self.name = name
         self.proj_folder = Path(self.name)
@@ -115,13 +114,13 @@ class BaseStrategy():
         size = self.size_condition(cur_price, lossprice)
         targetprice = self.calculate_target(symbol, cur_price, lossprice) 
         new_order = Order(symbol=symbol, size=size, ordertype='buy', delay=self.broker.delay, lossprice=lossprice, target=targetprice)
-        self.open_buys.append(new_order)
+        self.open_orders[symbol] = new_order
 
     def sell(self, symbol, all=False):
         # For now always sell the full position
         size = self.positions[symbol]['amount']
-        new_order = Order(symbol=symbol, size=size, ordertype='sell', delay=self.broker.delay)
-        self.open_sells.append(new_order)
+        new_order = Order(symbol=symbol, size=size, ordertype='sell', delay=self.broker.delay, comment=self.positions[symbol]['comment'])
+        self.open_orders[symbol] = new_order
 
     def step(self):
         """ Execute every minute after the new quotes have been appended """
@@ -130,54 +129,65 @@ class BaseStrategy():
         self.begin_step()
         # Check whether to buy or sell a certain symbol
         for symbol in self.watchlist:
-            if self.buy_condition(symbol):
-                self.buy(symbol)
-            if self.sell_condition(symbol):
-                self.sell(symbol)
+            
 
-        # Execute open sells
-        for order in self.open_sells:
-            cur_price = self.watchdata[order.symbol]["Price"].iloc[-1]
-            order = self.broker.execute_sell(self.portfolio, order, cur_price)
-            if order.status.value == 3:
-                self.positions[order.symbol]['amount'] -= order.size
-                if self.positions[order.symbol]['amount'] <= 0:
-                    del self.positions[order.symbol]
-                self.portfolio.history.append({ "Time": self.watchdata[order.symbol].index.tolist()[-1],
-                                                "Symbol": order.symbol,
-                                                "Amount": order.size,
-                                                "Price": self.watchdata[order.symbol]["Price"].iloc[-1],
-                                                "Type": order.ordertype.upper(),
-                                                "Status": OrderStatus(order.status).name}) 
+            # Check positions to sell
+            if symbol in self.positions and symbol not in self.open_orders:
+                if self.sell_condition(symbol):
+                    self.sell(symbol)               
 
-        # Execute open buys
-        for order in self.open_buys:
-            cur_price = self.watchdata[order.symbol]["Price"].iloc[-1]
-            order = self.broker.execute_buy(self.portfolio, order, cur_price)
-            if order.status.value == 3:
-                self.positions[order.symbol] = {'buy_price': cur_price,
-                                                        'buy_time': self.watchdata[order.symbol].index.tolist()[-1],
+            # Check what symbols to buy
+            if symbol not in self.positions and symbol not in self.open_orders:
+                if self.buy_condition(symbol):
+                    self.buy(symbol)
+
+            # Execute open orders
+            if symbol in self.open_orders:
+                order = self.open_orders[symbol]
+
+                # Execute open sell order
+                if order.ordertype == "sell":
+                    cur_price = self.watchdata[symbol]["Price"].iloc[-1]
+                    order = self.broker.execute_sell(self.portfolio, order, cur_price)
+                    # If sell order was completed add portfolio history entry
+                    if order.status.value == 3:
+                        self.positions[symbol]['amount'] -= order.size
+                        if self.positions[symbol]['amount'] <= 0:
+                            del self.positions[symbol]
+
+                        self.portfolio.history.append({ "Time": self.watchdata[symbol].index.tolist()[-1],
+                                                        "Symbol": symbol,
+                                                        "Amount": order.size,
+                                                        "Price": self.watchdata[symbol]["Price"].iloc[-1],
+                                                        "Type": order.ordertype.upper(),
+                                                        "Status": OrderStatus(order.status).name,
+                                                        "Comment": order.comment})                    
+
+                # Execute open buys
+                if order.ordertype == "buy":
+                    cur_price = self.watchdata[symbol]["Price"].iloc[-1]
+                    order = self.broker.execute_buy(self.portfolio, order, cur_price)
+                    # Add portfolio entry if buy order was completed or rejected
+                    if order.status.value in [3, 4]:
+                        self.portfolio.history.append({ "Time": self.watchdata[symbol].index.tolist()[-1],
+                                                        "Symbol": symbol,
+                                                        "Amount": order.size,
+                                                        "Price": cur_price,
+                                                        "Type": order.ordertype.upper(),
+                                                        "Status": OrderStatus(order.status).name})
+                        # Buy order completed, add position          
+                        if order.status.value == 3:
+                            self.positions[symbol] = {'buy_price': cur_price,
+                                                        'buy_time': self.watchdata[symbol].index.tolist()[-1],
                                                         'amount': order.size,
                                                         'stop_loss': order.lossprice,
                                                         'target': order.target}
 
-                self.portfolio.history.append({ "Time": self.watchdata[order.symbol].index.tolist()[-1],
-                                            "Symbol": order.symbol,
-                                            "Amount": order.size,
-                                            "Price": cur_price,
-                                            "Type": order.ordertype.upper(),
-                                            "Status": OrderStatus(order.status).name})
-            elif order.status.value == 4:
-                 self.portfolio.history.append({ "Time": self.watchdata[order.symbol].index.tolist()[-1],
-                                            "Symbol": order.symbol,
-                                            "Amount": order.size,
-                                            "Price": cur_price,
-                                            "Type": order.ordertype.upper(),
-                                            "Status": OrderStatus(order.status).name})               
+             
+
 
         # Remove completed or rejected orders from the open transactions
-        self.open_sells = [order for order in self.open_sells if order.status.value < 3]
-        self.open_buys = [order for order in self.open_buys if order.status.value < 3]
+        self.open_orders = {symbol: order for symbol, order in self.open_orders.items() if order.status.value < 3}
         self.end_step()
 
     def in_position(self):
@@ -284,7 +294,7 @@ class MACDStrategy(BaseStrategy):
 
     def buy_condition(self, symbol):
         """ (Changable) Determine when to buy stock """
-        if self.step_count > 15 and self.step_count < 80 and symbol not in self.positions:
+        if self.step_count > 15 and self.step_count < 80:
             if self.watchdata[symbol]['Price'].iloc[-1] > self.highs15[symbol]:
                 if (np.all(np.diff(self.watchdata[symbol]['SMA50'].iloc[-4:].to_numpy()) >= 0)
                     and np.all(np.diff(self.watchdata[symbol]['SMA100'].iloc[-2:].to_numpy()) >= 0)):
@@ -298,30 +308,29 @@ class MACDStrategy(BaseStrategy):
     def sell_condition(self, symbol):
         """ (Changable) Determine when to sell stock """
         cur_price = self.watchdata[symbol]['Price'].iloc[-1]
-        if symbol in self.positions:
-            if ((self.watchdata[symbol].index.tolist()[-1] - self.positions[symbol]['buy_time']).seconds / 60 > 3):
-                if (self.positions[symbol]['target'] <= cur_price):
-                    print("target reached")
-                    return True
-                if self.positions[symbol]['stop_loss'] >= cur_price:
-                    print("stop loss reached")
-                    return True
-                if self.watchdata[symbol]['SMA50'].iloc[-1] < self.watchdata[symbol]['SMA50'].iloc[-2] < self.watchdata[symbol]['SMA50'].iloc[-3] :
-                    print("SMA going down")
-                    return True
-                # if (self.watchdata[symbol]['MACD-Dif'].iloc[-1] < 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] > 0):
-                #     print("MACD Crossover")
-                #     return True
-                if self.watchdata[symbol]['RSI'].iloc[-1] > 80:
-                    print("RSI over 80")
-                    return True
+        if ((self.watchdata[symbol].index.tolist()[-1] - self.positions[symbol]['buy_time']).seconds / 60 > 3):
+            if (self.positions[symbol]['target'] <= cur_price):
+                self.positions[symbol]['comment'] = "Target reached"
+                return True
+            if self.positions[symbol]['stop_loss'] >= cur_price:
+                self.positions[symbol]['comment'] = "Stop loss reached"
+                return True
+            if self.watchdata[symbol]['SMA50'].iloc[-1] < self.watchdata[symbol]['SMA50'].iloc[-2] < self.watchdata[symbol]['SMA50'].iloc[-3]:
+                self.positions[symbol]['comment'] = "SMA going down"
+                return True
+            # if (self.watchdata[symbol]['MACD-Dif'].iloc[-1] < 0 and self.watchdata[symbol]['MACD-Dif'].iloc[-2] > 0):
+            #     print("MACD Crossover")
+            #     return True
+            if self.watchdata[symbol]['RSI'].iloc[-1] > 80:
+                self.positions[symbol]['comment'] = "RSI over 80"
+                return True
 
         return False
 
     def size_condition(self, cur_price, loss_price):
         """ (Changable) Determine and return the amount of shares to be bought in one order """
         if self.risk:
-            size  = (self.portfolio.cash * self.risk) // (cur_price - loss_price)
+            size  = (self.portfolio.init_cash * self.risk) // (cur_price - loss_price)
             if size == 0: size += 1
 
             return min(size, 400//cur_price)
@@ -386,7 +395,7 @@ class MomentumStrategy(BaseStrategy):
 
     def buy_condition(self, symbol):
         """ (Changable) Determine when to buy stock """
-        if self.step_count > 15 and self.step_count < 80 and symbol not in self.positions:
+        if self.step_count > 15 and self.step_count < 80:
             if (self.watchdata[symbol]['Price'].iloc[-1] > self.prev_close[symbol] * 1.04 and 
                 self.watchdata[symbol]['Price'].iloc[-1] > self.highs15[symbol] and
                 self.volume_today[symbol] > 20000):
@@ -404,10 +413,9 @@ class MomentumStrategy(BaseStrategy):
     def sell_condition(self, symbol):
         """ (Changable) Determine when to sell stock """
         cur_price = self.watchdata[symbol]['Price'].iloc[-1]
-        if symbol in self.positions:
-            if (self.positions[symbol]['target'] <= cur_price or 
-                self.positions[symbol]['stop_loss'] >= cur_price ):
-                return True
+        if (self.positions[symbol]['target'] <= cur_price or 
+            self.positions[symbol]['stop_loss'] >= cur_price ):
+            return True
         return False
 
     def size_condition(self, cur_price, loss_price):

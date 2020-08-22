@@ -25,7 +25,7 @@ class Portfolio():
 
 
 class Order():
-    def __init__(self, symbol="", size=0, ordertype=None, delay=0, lossprice=None, target=None):
+    def __init__(self, symbol="", size=0, ordertype=None, delay=0, lossprice=None, target=None, comment=""):
         self.size = abs(size)
         self.symbol = symbol
         self.status = OrderStatus(0)
@@ -35,6 +35,7 @@ class Order():
         self.delay = delay
         self.lossprice = lossprice
         self.target = target
+        self.comment = comment
 
 
 class OrderStatus(enum.Enum):

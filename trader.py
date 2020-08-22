@@ -44,8 +44,8 @@ class Trader():
         for symbol in del_symbols:
             if symbol in self.strategy.watchlist:
                 self.strategy.watchlist.remove(symbol)
-        for symbol in del_symbols:
-            self.global_watchlist.remove(symbol)
+            if symbol in self.global_watchlist:
+                self.global_watchlist.remove(symbol)
         print("Final watchlist: \n", self.global_watchlist)
 
     def get_quotes(self):
@@ -193,6 +193,6 @@ strat1 = MACDStrategy(broker=broker1, portfolio=Portfolio(), sma=50, name="macd-
 
 
 # trader = Trader(update_dailies=False, ignore_market=True, wait_open=False, max_minutes=0)
-trader = SimTrader(strategy=strat1, update_dailies=False, market_days=2, day=datetime(2020,8, 18))
+trader = SimTrader(strategy=strat1, update_dailies=False, market_days=1, day=datetime(2020,8, 18))
 
 trader.run()
